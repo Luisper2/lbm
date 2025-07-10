@@ -55,6 +55,7 @@ coverage.xml
 
 # Sphinx documentation
 docs/build/
+docs/_build
 docs/source/generated/
 
 # pytest
@@ -80,3 +81,5 @@ target/
 
 # Ipython Notebook
 .ipynb_checkpoints
+
+*.npy

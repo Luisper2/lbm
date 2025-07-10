@@ -12,4 +12,5 @@ lbmpy Documentation
    installation
    usage
    release-history
+   lbm
    min_versions
