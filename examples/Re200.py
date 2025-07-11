@@ -15,8 +15,7 @@ if __name__ == '__main__':
     tau = 3 * nu + 0.5
 
     sim = LBM(nx, ny, u0 = velocity, tau = tau, folder='./examples', prefix='Re200')
-    sim.run(1000, 100)
-    sim.run(1000, 100)
+    sim.run(1, 100, )
 
     
     # # print(tau)

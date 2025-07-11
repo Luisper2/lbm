@@ -1,22 +1,45 @@
 import os
 import jax
-import time
+import numpy as np
 from tqdm import tqdm
 import jax.numpy as jnp
 from functools import partial
+import matplotlib.pyplot as plt
 
-from lbmpy.plot import load_npy_frame
+def load_npy(file_path):
+    """
+    Carga un frame .npy con [u, v, rho] y devuelve X, Y, u, v, rho.
+    """
+    
+    file = np.load(file_path, allow_pickle = True).item()
+    
+    meta = file['meta']
+    u = file['u']
+    v = file['v']
+    rho = file['rho']
+
+    u = u.T
+    v = v.T
+    rho = rho.T
+    ny, nx = u.shape
+    x = np.arange(nx)
+    y = np.arange(ny)
+    X, Y = np.meshgrid(x, y)
+    return X, Y, u, v, rho, meta
 
 class LBM():
     '''
     This is a class.
     '''
-    def __init__(self, nx, ny, tau=1.0, u0=0.1, u=None, v=None, rho=None):
+    def __init__(self, nx: int = 100, ny: int = 100, tau: float = 1, u0: float = 0.1, u: jnp.ndarray = None, v: jnp.ndarray = None, rho: jnp.ndarray = None, prefix: str = None, continue_iteration: int = 0):
         self.nx = nx
         self.ny = ny
         self.tau = tau
         self.u0 = u0
         self.Q = 9
+
+        self.prefix = prefix + '_' if prefix else ''
+        self.continue_iteration = continue_iteration
 
         # --------------------------------------------------
         # 1) D2Q9 constants
@@ -199,27 +222,120 @@ class LBM():
         rho, u, v = self.compute_macroscopic_variables(fneu)
         return fneu, rho, u, v
 
+    def save(self, dir, iteration, u, v, rho, meta):
+        name = f'{dir}/{self.prefix}{iteration:07d}.npy'
+
+        jnp.save(name, { 'u': jnp.array(u), 'v': jnp.array(v), 'rho': jnp.array(rho), 'meta': meta })
+    
     # ------------------------------------------------------
     # 12) Execution loop and frame saving
     # ------------------------------------------------------
-    def run(self, steps, save, dir='./data'):
-        os.system('cls')
+    def run(self, steps, save, dir='./results/npy'):
+        meta = {
+            'tau': self.tau,
+            'u0': self.u0
+        }
+        
+        start = self.continue_iteration if self.continue_iteration else 0
 
         os.makedirs(dir, exist_ok=True)
+        
         f, rho, u, v = self.f, self.density, self.u, self.v
 
-        for it in tqdm(range(steps)):
+        for it in tqdm(range(start, start + steps)):
             f, rho, u, v = self.step(f, rho, u, v)
+            
             if it % save == 0:
-                jnp.save(f'{dir}/{it:07d}.npy', jnp.stack([jnp.array(u), jnp.array(v), jnp.array(rho)]))
+                meta['iteration'] = it
+
+                self.save(dir, it, u, v, rho, meta = meta)
 
         self.f, self.density, self.u, self.v = f, rho, u, v
 
-
-
     @classmethod
-    def from_npy(cls, npy_file, tau, u0):
-
-        X, Y, u, v, _, rho = load_npy_frame(npy_file)
+    def load_simulation(cls, file_dir: str = '/results/npy/000000.npy', tau: float | None = None, u0: float | None = None, prefix: str = None, continue_iteration: bool = True):
+        X, Y, u, v, rho, meta = load_npy(file_dir)
         nx, ny = u.shape
-        return LBM(nx=nx-2, ny=ny-2, u0=u0, tau=tau, u=u.T, v=v.T, rho=rho.T)
+
+        u0_load = float(meta['u0']) if u0 is None and meta.get('u0') is not None else u0
+        tau_load = float(meta['tau']) if tau is None and meta.get('tau') is not None else tau
+
+        if u0_load is None:
+            u0_load = 0.1
+        if tau_load is None:
+            tau_load = 1
+
+        return cls(nx = nx - 2, ny = ny - 2, tau = tau_load, u0 = u0_load, u = u.T, v = v.T, rho = rho.T, prefix = prefix, continue_iteration = int(meta['iteration']) if continue_iteration else 0)
+    
+def plotter(dir: str = '0000000.npy', save_dir: str = None, rewrite: bool = False, plot_velocity: bool = True, plot_density: bool = True, plot_vorticity: bool = True):
+    def create_plot(file_path, X, Y, data, u = None, v = None, title: str = '', label: str = ''):
+        width = X.max() - X.min()
+        height = Y.max() - Y.min()
+        aspect_ratio = width / height
+
+        base_height = 6
+        figsize = (aspect_ratio * base_height, base_height)
+
+        fig, ax = plt.subplots(figsize=figsize)
+
+        mesh = ax.pcolormesh(X, Y, data, shading='auto', cmap='rainbow')
+
+        fig.colorbar(mesh, ax=ax, label=label)
+
+        if u is not None and v is not None:
+            ax.streamplot(X, Y, u, v, density=1, color='k', linewidth=0.7, arrowsize=0.5)
+
+        ax.set_title(title)
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+
+        ax.set_aspect('auto')
+
+        fig.savefig(file_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+
+    path = os.path.join(os.getcwd(), dir)
+    
+    if not os.path.exists(path):
+        raise FileNotFoundError(f'Dir/File not exsist: {path}')
+    
+    save = os.path.join(os.getcwd(), 'results', save_dir) if save_dir else os.path.join(os.getcwd(), 'results', 'plots')
+    
+    files = [
+        os.path.join(path, f)
+        for f in os.listdir(path)
+        if os.path.isfile(os.path.join(path, f)) and f.endswith('.npy')
+    ] if os.path.isdir(path) else [path] if path.endswith('.npy') else []
+
+    if len(files) == 0:
+        raise FileNotFoundError('Not .npy file(s) founded')
+    
+    os.makedirs(save, exist_ok = True)
+
+    for file in files:
+        base = os.path.basename(file)
+        
+        cache_path = os.path.join(save, base)
+
+        os.makedirs(cache_path, exist_ok = True)
+
+        X, Y, u, v, rho, meta = load_npy(file)
+
+        name = ', '.join(f'{k}={v}' for k, v in meta.items()) if meta else base
+
+        velocity_path = os.path.join(cache_path, 'Velocity.png')
+        voritcity_path = os.path.join(cache_path, 'Vorticity.png')
+        density_path = os.path.join(cache_path, 'Density.png')
+
+        if plot_velocity and (rewrite or not os.path.exists(velocity_path)):
+            data = np.sqrt(u ** 2 + v ** 2)
+            
+            create_plot(velocity_path, X, Y, data, u, v, name, 'Velocity')
+
+        if plot_vorticity and (rewrite or not os.path.exists(voritcity_path)):
+            data = np.gradient(v, axis = 1) - np.gradient(u, axis = 0)
+            
+            create_plot(voritcity_path, X, Y, data, None, None, name, 'Vorticity')
+        
+        if plot_density and (rewrite or not os.path.exists(density_path)):
+            create_plot(density_path, X, Y, rho, None, None, name, 'Density')
