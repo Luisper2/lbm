@@ -83,3 +83,5 @@ target/
 .ipynb_checkpoints
 
 *.npy
+
+apiKeys.json

@@ -230,7 +230,7 @@ class LBM():
     # ------------------------------------------------------
     # 12) Execution loop and frame saving
     # ------------------------------------------------------
-    def run(self, steps, save, dir='./results/npy'):
+    def run(self, steps, save, dir = os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), 'results', 'npy')):
         meta = {
             'tau': self.tau,
             'u0': self.u0
@@ -253,8 +253,8 @@ class LBM():
         self.f, self.density, self.u, self.v = f, rho, u, v
 
     @classmethod
-    def load_simulation(cls, file_dir: str = '/results/npy/000000.npy', tau: float | None = None, u0: float | None = None, prefix: str = None, continue_iteration: bool = True):
-        X, Y, u, v, rho, meta = load_npy(file_dir)
+    def load_simulation(cls, file_dir: str = '000000.npy', tau: float | None = None, u0: float | None = None, prefix: str = None, continue_iteration: bool = True):
+        X, Y, u, v, rho, meta = load_npy(os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), 'results', 'npy', file_dir))
         nx, ny = u.shape
 
         u0_load = float(meta['u0']) if u0 is None and meta.get('u0') is not None else u0
@@ -289,17 +289,20 @@ def plotter(dir: str = '0000000.npy', save_dir: str = None, rewrite: bool = Fals
         ax.set_xlabel('X')
         ax.set_ylabel('Y')
 
+        ax.set_xlim(X.min()+1, X.max()-1)
+        ax.set_ylim(Y.min()+1, Y.max()-1)
+
         ax.set_aspect('auto')
 
         fig.savefig(file_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
 
-    path = os.path.join(os.getcwd(), dir)
+    path = os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), 'results', 'npy', dir)
     
     if not os.path.exists(path):
         raise FileNotFoundError(f'Dir/File not exsist: {path}')
     
-    save = os.path.join(os.getcwd(), 'results', save_dir) if save_dir else os.path.join(os.getcwd(), 'results', 'plots')
+    save = os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), 'results', save_dir) if save_dir else os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), 'results', 'plots')
     
     files = [
         os.path.join(path, f)
@@ -321,6 +324,12 @@ def plotter(dir: str = '0000000.npy', save_dir: str = None, rewrite: bool = Fals
 
         X, Y, u, v, rho, meta = load_npy(file)
 
+        X = X[1:-1, 1:-1]
+        Y = Y[1:-1, 1:-1]
+        u = u[1:-1, 1:-1]
+        v = v[1:-1, 1:-1]
+        rho = rho[1:-1, 1:-1]
+
         name = ', '.join(f'{k}={v}' for k, v in meta.items()) if meta else base
 
         velocity_path = os.path.join(cache_path, 'Velocity.png')
@@ -329,12 +338,10 @@ def plotter(dir: str = '0000000.npy', save_dir: str = None, rewrite: bool = Fals
 
         if plot_velocity and (rewrite or not os.path.exists(velocity_path)):
             data = np.sqrt(u ** 2 + v ** 2)
-            
             create_plot(velocity_path, X, Y, data, u, v, name, 'Velocity')
 
         if plot_vorticity and (rewrite or not os.path.exists(voritcity_path)):
             data = np.gradient(v, axis = 1) - np.gradient(u, axis = 0)
-            
             create_plot(voritcity_path, X, Y, data, None, None, name, 'Vorticity')
         
         if plot_density and (rewrite or not os.path.exists(density_path)):

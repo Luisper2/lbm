@@ -11,8 +11,8 @@ if __name__ == '__main__':
     nx = 256
     ny = 256
 
-    reynolds = 100
-    velocity = 0.01
+    reynolds = 400
+    velocity = 0.1
 
     nu = velocity * nx / reynolds
     tau = 3 * nu + 0.5
