@@ -1,5 +1,7 @@
 import os
 import jax
+from pathlib import Path
+
 import numpy as np
 from tqdm import tqdm
 import jax.numpy as jnp
@@ -254,7 +256,7 @@ class LBM():
 
     @classmethod
     def load_simulation(cls, file_dir: str = '000000.npy', tau: float | None = None, u0: float | None = None, prefix: str = None, continue_iteration: bool = True):
-        X, Y, u, v, rho, meta = load_npy(os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), 'results', 'npy', file_dir))
+        X, Y, u, v, rho, meta = load_npy(os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), file_dir))
         nx, ny = u.shape
 
         u0_load = float(meta['u0']) if u0 is None and meta.get('u0') is not None else u0
@@ -316,7 +318,7 @@ def plotter(dir: str = '0000000.npy', save_dir: str = None, rewrite: bool = Fals
     os.makedirs(save, exist_ok = True)
 
     for file in files:
-        base = os.path.basename(file)
+        base = Path(os.path.basename(file)).stem
         
         cache_path = os.path.join(save, base)
 

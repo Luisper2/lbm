@@ -51,20 +51,26 @@ class Queue:
             return f'{simulation['path']} successfully ran ({(time.perf_counter() - start):.3f}s)'
         except subprocess.CalledProcessError as e:
             return f'{simulation['path']} failed ({e.stderr.strip()}) ({(time.perf_counter() - start):.3f}s)'
+        except BaseException as e:
+            return f'{simulation['path']} failed ({e}) ({(time.perf_counter() - start):.3f}s)'
 
     def launch(self):
         for simulation in self.queue:
-            result = self.run(simulation)
+            try:
+                result = self.run(simulation)
 
-            self.sendMessage(message = result)
+                self.sendMessage(message = result)
 
-            if 'plots' in simulation and simulation['plots']:
-                dir = os.path.join(os.getcwd(), simulation['path'], '..' , 'Results', 'Plots')
+                if 'plots' in simulation and simulation['plots']:
+                    dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), simulation['path'], '..', 'results', 'plots'))
 
-                for img in Path(dir).rglob('Velocity.png'):
-                    success = self.sendPhoto(path = str(img), message = f'`{img.relative_to(dir)}`')
+                    for img in Path(dir).rglob('Velocity.png'):
+                        success = self.sendPhoto(path = str(img), message = f'`{img.relative_to(dir)}`')
 
-                    time.sleep(1)
-                   
-                    if not success:
-                        print(f'Fail submitting {img}')
+                        time.sleep(1)
+                    
+                        if not success:
+                            print(f'Fail submitting {img}')
+            except Exception as e:
+                print("Ocurrió un error:", e)
+            

@@ -11,13 +11,13 @@ if __name__ == '__main__':
     nx = 256
     ny = 256
 
-    reynolds = 100
-    velocity = 0.01
+    reynolds = 200
+    velocity = 0.1
 
     nu = velocity * nx / reynolds
     tau = 3 * nu + 0.5
 
-    simulation = LBM(nx, ny, tau, velocity)
+    simulation = LBM.load_simulation('../Re100/results/npy/9990000.npy', tau = tau, u0 = velocity, continue_iteration = False)
     simulation.run(steps = 10000000, save = 10000)
 
     plotter('9990000.npy', rewrite = True)

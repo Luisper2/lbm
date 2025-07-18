@@ -85,3 +85,5 @@ target/
 *.npy
 
 apiKeys.json
+
+examples/Cavity/*/results/

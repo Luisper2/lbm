@@ -6,15 +6,31 @@ with open('apiKeys.json', 'r') as f:
 
 simulations = [
     {
-        'path': '../Re100/setup.py',
+        'path': './Re100/setup.py',
         'plots': True,
     },
     {
-        'path': '../Re400/setup.py',
+        'path': './Re200/setup.py',
         'plots': True,
     },
     {
-        'path': '../Re1000/setup.py',
+        'path': './Re400/setup.py',
+        'plots': True,
+    },
+    {
+        'path': './Re1000/setup.py',
+        'plots': True,
+    },
+    {
+        'path': './Re2000/setup.py',
+        'plots': True,
+    },
+    {
+        'path': './Re5000/setup.py',
+        'plots': True,
+    },
+    {
+        'path': './Re7500/setup.py',
         'plots': True,
     }
 ]

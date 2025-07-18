@@ -17,9 +17,9 @@ if __name__ == '__main__':
     nu = velocity * nx / reynolds
     tau = 3 * nu + 0.5
 
-    simulation = LBM.load_simulation('../../../Re100/results/npy/2490000.npy', tau = tau, u0 = velocity, continue_iteration = False)
-    simulation.run(steps = 2500000, save = 10000)
+    simulation = LBM.load_simulation('../Re200/results/npy/9990000.npy', tau = tau, u0 = velocity, continue_iteration = False)
+    simulation.run(steps = 10000000, save = 10000)
 
-    plotter('2490000.npy', rewrite = True)
+    plotter('9990000.npy', rewrite = True)
 
     print(f'Done ({(time.perf_counter() - start):.3f}s)')
