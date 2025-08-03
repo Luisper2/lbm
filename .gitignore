@@ -87,3 +87,4 @@ target/
 apiKeys.json
 
 examples/Cavity/*/results/
+lbmpy/tests/*
