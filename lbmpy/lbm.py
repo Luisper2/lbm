@@ -77,8 +77,6 @@ class LBM():
             self.v       = v
             self.density = rho
 
-
-
         # --------------------------------------------------
         # 4) Initial equilibrium distribution (rest state)
         # --------------------------------------------------
