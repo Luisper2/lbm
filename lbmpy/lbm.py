@@ -164,7 +164,7 @@ class LBM():
             },
         }
 
-        self.x, self.y = jnp.meshgrid(jnp.arange(nx+2, dtype=jnp.float32) - 0.5, jnp.arange(ny+2, dtype=jnp.float32) - 0.5, indexing='ij')
+        self.x, self.y = jnp.meshgrid(jnp.arange(self.nx + 2, dtype=jnp.float32) - 0.5, jnp.arange(self.ny + 2, dtype=jnp.float32) - 0.5, indexing='ij')
 
         shape = (self.nx + 2, self.ny + 2)
         
