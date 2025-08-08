@@ -1,273 +1,354 @@
 import os
 import jax
-from pathlib import Path
-
+import copy
+import matplotlib
 import numpy as np
 from tqdm import tqdm
 import jax.numpy as jnp
+from pathlib import Path
 from functools import partial
 import matplotlib.pyplot as plt
 
-def load_npy(file_path):
-    """
-    Carga un frame .npy con [u, v, rho] y devuelve X, Y, u, v, rho.
-    """
-    
-    file = np.load(file_path, allow_pickle = True).item()
-    
-    meta = file['meta']
-    u = file['u']
-    v = file['v']
-    rho = file['rho']
+def load_data(file_path):
+    extension = os.path.splitext(file_path)[1].lower()
 
-    u = u.T
-    v = v.T
-    rho = rho.T
-    ny, nx = u.shape
-    x = np.arange(nx)
-    y = np.arange(ny)
-    X, Y = np.meshgrid(x, y)
-    return X, Y, u, v, rho, meta
+    if extension == '.npy':
+        file = np.load(file_path, allow_pickle=True).item()
+
+        conditions = file.get('conditions', {})
+        u          = file['u']
+        v          = file['v']
+        rho        = file['rho']
+        mask       = file.get('mask', None)
+
+        u   = u.T
+        v   = v.T
+        rho = rho.T
+        if mask is not None:
+            mask = mask.T
+
+        ny, nx = u.shape
+        x = np.arange(nx)
+        y = np.arange(ny)
+        X, Y = np.meshgrid(x, y)
+
+    elif extension == '.dat':
+        conditions = {}
+        data_rows = []
+        
+        with open(file_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+        
+                if not line or line.startswith('#'):
+                    if ':' in line and not line.lower().startswith('# x y u v rho'):
+                        key, val = line.lstrip('#').split(':', 1)
+                        conditions[key.strip()] = val.strip()
+                    continue
+
+                parts = line.split()
+        
+                if len(parts) != 6:
+                    continue
+
+                data_rows.append([float(p) for p in parts])
+
+        data = np.array(data_rows)
+        i_idx     = data[:, 0].astype(int)
+        j_idx     = data[:, 1].astype(int)
+        u_vals    = data[:, 2]
+        v_vals    = data[:, 3]
+        rho_vals  = data[:, 4]
+        mask_vals = data[:, 5].astype(int)
+
+        nx = i_idx.max() + 1
+        ny = j_idx.max() + 1
+
+        u   = np.zeros((ny, nx))
+        v   = np.zeros((ny, nx))
+        rho = np.zeros((ny, nx))
+        mask= np.zeros((ny, nx), dtype=bool)
+
+        u[j_idx, i_idx]    = u_vals
+        v[j_idx, i_idx]    = v_vals
+        rho[j_idx, i_idx]  = rho_vals
+        mask[j_idx, i_idx] = mask_vals == 1
+
+        x = np.arange(nx)
+        y = np.arange(ny)
+        X, Y = np.meshgrid(x, y)
+
+    else:
+        raise ValueError(f'Unsupported format ({extension}). Use .npy or .dat.')
+
+    return X, Y, u, v, rho, conditions, mask
 
 class LBM():
-    '''
-    This is a class.
-    '''
-    def __init__(self, nx: int = 100, ny: int = 100, tau: float = 1, u0: float = 0.1, u: jnp.ndarray = None, v: jnp.ndarray = None, rho: jnp.ndarray = None, prefix: str = None, continue_iteration: int = 0):
-        self.nx = nx
-        self.ny = ny
-        self.tau = tau
-        self.u0 = u0
-        self.Q = 9
+    def __init__(self, conditions: dict = None, mask: jnp.ndarray = None, u: jnp.ndarray = None, v: jnp.ndarray = None, rho: jnp.ndarray = None, prefix: str = None, continue_iteration: int = 0):
+        self.conditions = conditions if conditions else {
+            'nx': 100,
+            'ny': 100,
+            'tau': 1,
+            'walls': [],
+            'periodic': ['v'],
+            'inputs': [{
+                'l': 0.1
+            }]
+        }
+
+        self.nx  = self.conditions['nx']
+        self.ny  = self.conditions['ny']
+        self.tau = self.conditions['tau']
+        
+        self.dimentions = 9
 
         self.prefix = prefix + '_' if prefix else ''
-        self.continue_iteration = continue_iteration
+        self.continue_iterations = continue_iteration
 
-        # --------------------------------------------------
-        # 1) D2Q9 constants
-        # --------------------------------------------------
-        # Weights for each discrete velocity direction
-        self.wt = jnp.array([4/9] + [1/9]*4 + [1/36]*4, dtype=jnp.float32)
-        # Discrete velocity vectors (ex, ey)
+        self.index = jnp.array([0, 1, 2, 3, 4, 5, 6, 7, 8], dtype=jnp.int32)
+        self.wt    = jnp.array([4/9] + [1/9]*4 + [1/36]*4, dtype=jnp.float32)
+        
         self.ex = jnp.array([0, 1, 0, -1, 0, 1, -1, -1, 1], dtype=jnp.int32)
         self.ey = jnp.array([0, 0, 1,  0, -1, 1,  1, -1,-1], dtype=jnp.int32)
-        # Opposite direction mapping for bounce-back boundary condition
-        self.bounce_back = jnp.array([0,3,4,1,2,7,8,5,6], dtype=jnp.int32)
+        
+        self.bounce = jnp.array([0,3,4,1,2,7,8,5,6], dtype=jnp.int32)
 
-        # --------------------------------------------------
-        # 2) Physical coordinates including ghost nodes
-        # --------------------------------------------------
-        # Domain indices: i=0..nx+1, j=0..ny+1
-        self.x, self.y = jnp.meshgrid(
-            jnp.arange(nx+2, dtype=jnp.float32) - 0.5,
-            jnp.arange(ny+2, dtype=jnp.float32) - 0.5,
-            indexing='ij'
-        )
+        self.params = {
+            't': {
+                'bb':       jnp.array([2, 5, 6], dtype=jnp.int32),
+                'comp':     self.ex,
+                'int': {
+                    'i': jnp.arange(1, self.nx+1, dtype=jnp.int32),
+                    'j': self.ny
+                },
+                'ext':      {
+                    'i': jnp.arange(1, self.nx+1, dtype=jnp.int32),
+                    'j': self.ny + 1
+                },
+            },
+            'b': {
+                'bb':        jnp.array([4, 7, 8], dtype=jnp.int32),
+                'comp':      self.ex,
+                'int':  {
+                    'i': jnp.arange(1, self.nx+1, dtype=jnp.int32),
+                    'j': 1
+                },
+                'ext':       {
+                    'i': jnp.arange(1, self.nx+1, dtype=jnp.int32),
+                    'j': 0
+                },
+            },
+            'l': {
+                'bb':       jnp.array([3, 6, 7], dtype=jnp.int32),
+                'comp':     self.ey,
+                'int': {
+                    'i': 1,
+                    'j': jnp.arange(1, self.ny+1, dtype=jnp.int32)
+                },
+                'ext':      {
+                    'i': 0,
+                    'j': jnp.arange(1, self.ny+1, dtype=jnp.int32)
+                },
+            },
+            'r': {
+                'bb':       jnp.array([1, 5, 8], dtype=jnp.int32),
+                'comp':     self.ey,
+                'int': {
+                    'i': self.nx,
+                    'j': jnp.arange(1, self.ny+1, dtype=jnp.int32)
+                },
+                'ext':      {
+                    'i': self.nx + 1,
+                    'j': jnp.arange(1, self.ny+1, dtype=jnp.int32)
+                },
+            },
+        }
 
-        # --------------------------------------------------
-        # 3) Macroscopic fields initialization
-        # --------------------------------------------------
-        shape = (nx+2, ny+2)
-        self.u       = jnp.zeros(shape, dtype=jnp.float32)
-        self.v       = jnp.zeros(shape, dtype=jnp.float32)
-        self.density = jnp.ones(shape,  dtype=jnp.float32)
+        self.x, self.y = jnp.meshgrid(jnp.arange(nx+2, dtype=jnp.float32) - 0.5, jnp.arange(ny+2, dtype=jnp.float32) - 0.5, indexing='ij')
+
+        shape = (self.nx + 2, self.ny + 2)
+        
+        self.u   = jnp.zeros(shape, dtype=jnp.float32)
+        self.v   = jnp.zeros(shape, dtype=jnp.float32)
+        self.rho = jnp.ones(shape,  dtype=jnp.float32)
         
         if u is not None:
-            self.u       = u
-            self.v       = v
-            self.density = rho
+            self.u = u
+        if v is not None:
+            self.v = v
+        if rho is not None:
+            self.rho = rho
 
-        # --------------------------------------------------
-        # 4) Initial equilibrium distribution (rest state)
-        # --------------------------------------------------
-        # f[k,i,j] for k=0..8, i=0..nx+1, j=0..ny+1
-        feq0 = (self.density[None, :, :] * self.wt[:, None, None])
-        self.f = feq0.copy()                  # initial state
-        self.ferr = jnp.zeros_like(self.f)    # distribution error
+        self.f = self.equilibrium(self.u, self.v, self.rho)
+        self.ferr = jnp.zeros_like(self.f)
 
-    # ------------------------------------------------------
-    # 5) Discrete Maxwell-Boltzmann equilibrium
-    # ------------------------------------------------------
+        expected = (self.nx, self.ny)
+
+        if mask is not None and mask.shape == expected:
+            self.mask = jnp.pad(mask, pad_width=((1,1), (1,1)), constant_values=False)
+        else:
+            self.mask = jnp.zeros((self.nx+2, self.ny+2), dtype=bool)
+
+
+        for wall in self.conditions.get('walls', []):
+            ext = self.params[wall]['ext']
+
+            self.mask = self.mask.at[(ext['i'], ext['j'])].set(True)
+
     @partial(jax.jit, static_argnums=0)
-    def compute_equilibrium(self, density, u, v):
-        """
-            fᵢᵉ = ρ Wᵢ (1 + 3 cᵢ ⋅ u + 9/2 (cᵢ ⋅ u)² - 3/2 ||u||₂²)
-
-            fᵢᵉ : Equilibrium discrete velocities
-            ρ   : Density
-            cᵢ  : Lattice Velocities
-            Wᵢ  : Lattice Weights
-        """
-        usq = u**2 + v**2                                # squared speed field
+    def equilibrium(self, u: jnp.ndarray = None, v: jnp.ndarray = None, rho: jnp.ndarray = None) -> jnp.ndarray:
+        usq = u**2 + v**2
         cu  = (u[None] * self.ex[:,None,None] +
-               v[None] * self.ey[:,None,None])          # dot product e_i · u
-        feq = density[None] * self.wt[:,None,None] * (
+               v[None] * self.ey[:,None,None])
+        feq = rho[None] * self.wt[:,None,None] * (
               1 + 3*cu + 4.5*cu**2 - 1.5*usq[None]
         )
 
         return feq
 
-    # ------------------------------------------------------
-    # 6) BGK collision step
-    # ------------------------------------------------------
     @partial(jax.jit, static_argnums=0)
-    def collide(self, f, feq):
-        """
-            Bhatnagar-Gross-Krook
-
-            fᵢ = fᵢ - ω (fᵢ - fᵢᵉ)
-
-            fᵢ  : Discrete velocities
-            fᵢᵉ : Equilibrium discrete velocities
-            ω   : Relaxation factor
-        """
-        # Relaxation towards equilibrium
-
+    def collide(self, f: jnp.ndarray = None, feq: jnp.ndarray = None)  -> jnp.ndarray:
         return f - (f - feq) / self.tau
         
-    # ------------------------------------------------------
-    # 7) Pure streaming step (functional, no side effects)
-    # ------------------------------------------------------
     @partial(jax.jit, static_argnums=0)
-    def stream(self, f):
-        ftemp = f
-        # Shift each distribution component by its discrete velocity
+    def stream(self, f: jnp.ndarray = None) -> tuple[jnp.ndarray, jnp.ndarray]:
         def shift_fk(fk, dx, dy):
             return jnp.roll(jnp.roll(fk, dx, axis=0), dy, axis=1)
 
-        f_stream = jnp.stack([
-            shift_fk(f[k], self.ex[k], self.ey[k])
-            for k in range(self.Q)
-        ], axis=0)
-        return f_stream, ftemp
+        ftemp   = f
+        f_steam = jnp.stack([shift_fk(f[k], self.ex[k], self.ey[k]) for k in range(self.dimentions)])
 
-    # ------------------------------------------------------
-    # 8) Bounce-back no-slip on all four boundaries
-    # ------------------------------------------------------
+        return f_steam, ftemp
+
     @partial(jax.jit, static_argnums=0)
-    def apply_bounce_back(self, f, ftemp):
-        """
-        Implements no-slip bounce-back:
-          f[k, i,    0 ] = ftemp[opp[k], i,    1 ]  # bottom
-          f[k, i, ny+1] = ftemp[opp[k], i, ny   ]  # top
-          f[k,    0, j] = ftemp[opp[k], 1,    j]  # left
-          f[k, nx+1, j] = ftemp[opp[k], nx,   j]  # right
-        """
-        k_all = jnp.arange(self.Q)
-        i = jnp.arange(1, self.nx+1)
-        j = jnp.arange(1, self.ny+1)
+    def bounce_back(self, f: jnp.ndarray) -> jnp.ndarray:
+        return jnp.stack([jnp.where(self.mask, f[self.bounce[k]], f[k]) for k in range(self.dimentions)], axis=0)
 
-        # bottom boundary (j=0)
-        K,I = jnp.meshgrid(k_all, i, indexing='ij')
-        f = f.at[K, I, 0].set(ftemp[self.bounce_back[K], I, 1])
+    @partial(jax.jit, static_argnums=0)
+    def neumann_bc(self, f: jnp.ndarray = None, ftemp: jnp.ndarray = None, rho: jnp.ndarray = None) -> jnp.ndarray:
+        walls  = self.conditions.get('walls', [])
+        inputs = self.conditions.get('inputs', [])
 
-        # top boundary (j=ny+1)
-        f = f.at[K, I, self.ny+1].set(ftemp[self.bounce_back[K], I, self.ny])
+        u_vals = {
+            side: inp[side]
+            for inp in inputs
+            for side in ('t','b','l','r')
+            if side in inp
+        }
 
-        # left boundary (i=0)
-        J = jnp.arange(1, self.ny+1)
-        K,J2 = jnp.meshgrid(k_all, J, indexing='ij')
-        f = f.at[K, 0, J2].set(ftemp[self.bounce_back[K], 1, J2])
+        for side in walls:
+            if side not in self.params or side not in u_vals:
+                continue
 
-        # right boundary (i=nx+1)
-        f = f.at[K, self.nx+1, J2].set(ftemp[self.bounce_back[K], self.nx, J2])
+            p      = self.params[side]
+            k_idx  = p['bb']
+            comp   = p['comp']
+            u_wall = u_vals[side]
+
+            if side in ('t','b'):
+                i_idx = p['int']['i']
+                j     = p['int']['j']
+                K, I  = jnp.meshgrid(k_idx, i_idx, indexing='ij')
+                J     = jnp.full_like(I, j)
+
+            else:
+                j_idx = p['int']['j']
+                i     = p['int']['i']
+                K, J  = jnp.meshgrid(k_idx, j_idx, indexing='ij')
+                I     = jnp.full_like(J, i)
+
+            term     = 6 * self.wt[K] * rho[I, J] * comp[K] * u_wall
+            new_vals = ftemp[K, I, J] - term
+            bb       = self.bounce[K]
+
+            f = f.at[bb, I, J].set(new_vals)
 
         return f
 
-    # ------------------------------------------------------
-    # 9) Neumann boundary on top (constant velocity)
-    # ------------------------------------------------------
     @partial(jax.jit, static_argnums=0)
-    def compute_neumann_bc(self, f, ftemp, density):
-        # apply Neumann condition for k=2,5,6 at j=ny (interior layer)
-        k_inx = jnp.array([2,5,6], dtype=jnp.int32)
-        i_arr = jnp.arange(1, self.nx+1, dtype=jnp.int32)
-        # Create 2D index arrays (K x I)
-        K, I = jnp.meshgrid(k_inx, i_arr, indexing='ij')
-        j = self.ny
+    def macroscopic(self, f: jnp.ndarray = None) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        rho = jnp.sum(f, axis=0)
+        nonzero = rho > 1e-8
 
-        term    = 6 * self.wt[K] * density[I,j] * self.ex[K] * self.u0
-        new_vals= ftemp[K, I, j] - term
-        bb      = self.bounce_back[K]
-        # Update interior layer at j=ny
-        f = f.at[bb, I, j].set(new_vals)
-        return f
+        u = jnp.sum(f * self.ex[:,None,None], axis=0) / jnp.where(nonzero, rho, 1.0)
+        v = jnp.sum(f * self.ey[:,None,None], axis=0) / jnp.where(nonzero, rho, 1.0)
 
-    # ------------------------------------------------------
-    # 10) Compute macroscopic variables (density, velocity)
-    # ------------------------------------------------------
-    @partial(jax.jit, static_argnums=0)
-    def compute_macroscopic_variables(self, f):
-        density = jnp.sum(f, axis=0)
-        nonzero = density > 1e-8
-
-        u = jnp.sum(f * self.ex[:,None,None], axis=0) / jnp.where(nonzero, density, 1.0)
-        v = jnp.sum(f * self.ey[:,None,None], axis=0) / jnp.where(nonzero, density, 1.0)
         u = jnp.where(nonzero, u, 0.0)
         v = jnp.where(nonzero, v, 0.0)
 
-        # You can insert your linear boundary mirror logic here
-        return density, u, v
+        return u, v, rho
 
-    # ------------------------------------------------------
-    # 11) Single LBM step: all kernels functional and jitted
-    # ------------------------------------------------------
     @partial(jax.jit, static_argnums=0)
-    def step(self, f, density, u, v):
-        feq    = self.compute_equilibrium(density, u, v)
-        fcol   = self.collide(f, feq)
+    def step(self, f: jnp.ndarray = None, u: jnp.ndarray = None, v: jnp.ndarray = None, rho: jnp.ndarray = None) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        feq         = self.equilibrium(u, v, rho)
+        fcol        = self.collide(f, feq)
         fstr, ftemp = self.stream(fcol)
-        fbb    = self.apply_bounce_back(fstr, ftemp)
-        fneu   = self.compute_neumann_bc(fbb, ftemp, density)
-        rho, u, v = self.compute_macroscopic_variables(fneu)
-        return fneu, rho, u, v
+        fbb         = self.bounce_back(fstr)
+        fneu        = self.neumann_bc(fbb, ftemp, rho)
+        u, v, rho   = self.macroscopic(fneu)
+        
+        return fneu, u, v, rho
 
-    def save(self, dir, iteration, u, v, rho, meta):
-        name = f'{dir}/{self.prefix}{iteration:07d}.npy'
+    def save(self, dir: str, export: str = 'npy', iteration: int = 0, u: jnp.ndarray = None, v: jnp.ndarray = None, rho: jnp.ndarray = None, conditions: dict = {}, mask: jnp.ndarray = None) -> None:
+        name = os.path.join(dir, f'{self.prefix}{iteration:07d}.{export}')
 
-        jnp.save(name, { 'u': jnp.array(u), 'v': jnp.array(v), 'rho': jnp.array(rho), 'meta': meta })
+        if export == 'npy':
+            jnp.save(name, { 'u': jnp.array(u), 'v': jnp.array(v), 'rho': jnp.array(rho), 'conditions': conditions, 'mask': mask })
+        elif export == 'dat':
+            u_np   = np.asarray(u)
+            v_np   = np.asarray(v)
+            rho_np = np.asarray(rho)
+            mask_np= np.asarray(mask)
+            nx, ny = u_np.shape
+
+            with open(name, 'w') as f:
+                f.write('# X Y U V RHO MASK\n')
+                
+                for key, val in conditions.items():
+                    f.write(f'# {key}: {val}\n')
+
+                for i in range(nx):
+                    for j in range(ny):
+                        m = int(mask_np[i, j])
+                        f.write(
+                            f'{i} {j} '
+                            f'{u_np[i, j]:.6e} '
+                            f'{v_np[i, j]:.6e} '
+                            f'{rho_np[i, j]:.6e} '
+                            f'{m}\n'
+                        )
+        else:
+            raise ValueError(f'Unsupported format ({export}). Use .npy or .dat.')
     
-    # ------------------------------------------------------
-    # 12) Execution loop and frame saving
-    # ------------------------------------------------------
-    def run(self, steps, save, dir = os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), 'results', 'npy')):
-        meta = {
-            'tau': self.tau,
-            'u0': self.u0
-        }
-        
-        start = self.continue_iteration if self.continue_iteration else 0
+    def run(self, steps: int = 5001, save: int = 100, dir = os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), 'results'), export: str = 'npy'):
+        save_path = os.path.join(dir, export)
+        os.makedirs(save_path, exist_ok = True)
 
-        os.makedirs(dir, exist_ok=True)
+        f, mask, u, v, rho = self.f, self.mask, self.u, self.v, self.rho
         
-        f, rho, u, v = self.f, self.density, self.u, self.v
+        for it in tqdm(range(self.continue_iterations, self.continue_iterations + steps)):
+            f, u, v, rho = self.step(f, u, v, rho)
 
-        for it in tqdm(range(start, start + steps)):
-            f, rho, u, v = self.step(f, rho, u, v)
-            
             if it % save == 0:
-                meta['iteration'] = it
+                self.conditions['iteration'] = it
 
-                self.save(dir, it, u, v, rho, meta = meta)
+                self.save(save_path, export, it, u, v, rho, self.conditions, mask)
 
-        self.f, self.density, self.u, self.v = f, rho, u, v
+        self.f, self.u, self.v, self.rho = f, u, v, rho
 
     @classmethod
-    def load_simulation(cls, file_dir: str = '000000.npy', tau: float | None = None, u0: float | None = None, prefix: str = None, continue_iteration: bool = True):
-        X, Y, u, v, rho, meta = load_npy(os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), file_dir))
-        nx, ny = u.shape
+    def load_simulation(cls, file_dir: str = '0000000.npy', conditions: dict = None, mask: jnp.ndarray = None, prefix: str = None, continue_iteration: bool = True):
+        X, Y, u, v, rho, load_conditions, load_mask = load_data(os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), file_dir))
 
-        u0_load = float(meta['u0']) if u0 is None and meta.get('u0') is not None else u0
-        tau_load = float(meta['tau']) if tau is None and meta.get('tau') is not None else tau
+        if conditions is not None:
+            load_conditions.update(conditions)
 
-        if u0_load is None:
-            u0_load = 0.1
-        if tau_load is None:
-            tau_load = 1
+        if mask is not None:
+            load_mask = mask
 
-        return cls(nx = nx - 2, ny = ny - 2, tau = tau_load, u0 = u0_load, u = u.T, v = v.T, rho = rho.T, prefix = prefix, continue_iteration = int(meta['iteration']) if continue_iteration else 0)
-    
-def plotter(dir: str = '0000000.npy', save_dir: str = None, rewrite: bool = False, plot_velocity: bool = True, plot_density: bool = True, plot_vorticity: bool = True):
+        return cls(conditions = load_conditions, mask = load_mask, u = u.T, v = v.T, rho = rho.T, prefix = prefix, continue_iteration = int(load_conditions['iteration']) if continue_iteration else 0)
+
+def plotter (dir: str = '0000000.npy', save_dir = None, rewrite: bool = False, velocity: bool = True, density: bool = True, vorticity: bool = True):
     def create_plot(file_path, X, Y, data, u = None, v = None, title: str = '', label: str = ''):
         width = X.max() - X.min()
         height = Y.max() - Y.min()
@@ -297,7 +378,10 @@ def plotter(dir: str = '0000000.npy', save_dir: str = None, rewrite: bool = Fals
         fig.savefig(file_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
 
-    path = os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), 'results', 'npy', dir)
+    matplotlib.use('Agg')
+
+    extension = Path(dir).suffix.lstrip('.')
+    path = os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), 'results', extension, f'{dir}')
     
     if not os.path.exists(path):
         raise FileNotFoundError(f'Dir/File not exsist: {path}')
@@ -307,11 +391,11 @@ def plotter(dir: str = '0000000.npy', save_dir: str = None, rewrite: bool = Fals
     files = [
         os.path.join(path, f)
         for f in os.listdir(path)
-        if os.path.isfile(os.path.join(path, f)) and f.endswith('.npy')
-    ] if os.path.isdir(path) else [path] if path.endswith('.npy') else []
+        if os.path.isfile(os.path.join(path, f)) and f.endswith(f'.{extension}')
+    ] if os.path.isdir(path) else [path] if path.endswith(f'.{extension}') else []
 
     if len(files) == 0:
-        raise FileNotFoundError('Not .npy file(s) founded')
+        raise FileNotFoundError(f'Not .{extension} file(s) founded')
     
     os.makedirs(save, exist_ok = True)
 
@@ -322,7 +406,7 @@ def plotter(dir: str = '0000000.npy', save_dir: str = None, rewrite: bool = Fals
 
         os.makedirs(cache_path, exist_ok = True)
 
-        X, Y, u, v, rho, meta = load_npy(file)
+        X, Y, u, v, rho, conditions, mask = load_data(file)
 
         X = X[1:-1, 1:-1]
         Y = Y[1:-1, 1:-1]
@@ -330,19 +414,31 @@ def plotter(dir: str = '0000000.npy', save_dir: str = None, rewrite: bool = Fals
         v = v[1:-1, 1:-1]
         rho = rho[1:-1, 1:-1]
 
-        name = ', '.join(f'{k}={v}' for k, v in meta.items()) if meta else base
+        remove = ['nx', 'ny', 'walls', 'periodic', 'inputs']  
+        cache = copy.deepcopy(conditions)
+
+        for key in remove:
+            cache.pop(key, None)
+
+        remove = ['nx', 'ny', 'walls', 'periodic', 'inputs']
+        cache = conditions.copy()
+
+        for key in remove:
+            cache.pop(key, None)
+
+        name = f'{', '.join([*[f'{k}={cache[k]}' for k in cache]])} ({conditions['nx']}, {conditions['ny']})' or base
 
         velocity_path = os.path.join(cache_path, 'Velocity.png')
         voritcity_path = os.path.join(cache_path, 'Vorticity.png')
         density_path = os.path.join(cache_path, 'Density.png')
 
-        if plot_velocity and (rewrite or not os.path.exists(velocity_path)):
+        if velocity and (rewrite or not os.path.exists(velocity_path)):
             data = np.sqrt(u ** 2 + v ** 2)
             create_plot(velocity_path, X, Y, data, u, v, name, 'Velocity')
 
-        if plot_vorticity and (rewrite or not os.path.exists(voritcity_path)):
+        if vorticity and (rewrite or not os.path.exists(voritcity_path)):
             data = np.gradient(v, axis = 1) - np.gradient(u, axis = 0)
             create_plot(voritcity_path, X, Y, data, None, None, name, 'Vorticity')
         
-        if plot_density and (rewrite or not os.path.exists(density_path)):
+        if density and (rewrite or not os.path.exists(density_path)):
             create_plot(density_path, X, Y, rho, None, None, name, 'Density')

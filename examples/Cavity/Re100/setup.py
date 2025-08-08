@@ -19,7 +19,7 @@ if __name__ == '__main__':
 
     simulation = LBM(nx, ny, tau, velocity)
     simulation.run(steps = 10000000, save = 10000)
-
+    
     plotter('9990000.npy', rewrite = True)
 
     print(f'Done ({(time.perf_counter() - start):.3f}s)')
