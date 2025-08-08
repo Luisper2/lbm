@@ -29,11 +29,8 @@ if __name__ == '__main__':
         }]
     }
 
-    # simulation = LBM(nx, ny, tau, velocity)
-    # simulation.run(steps = 10000000, save = 10000)
-
-    sim = LBM(conditions = conditions)
-    sim.run(export='dat')
+    simulation = LBM(conditions = conditions)
+    simulation.run(steps = 10000000, save = 10000)
     
     plotter('9990000.npy', rewrite = True)
 

@@ -17,7 +17,19 @@ if __name__ == '__main__':
     nu = velocity * nx / reynolds
     tau = 3 * nu + 0.5
 
-    simulation = LBM.load_simulation('../Re200/results/npy/9990000.npy', tau = tau, u0 = velocity, continue_iteration = False)
+    conditions = {
+        'nx': nx,
+        'ny': ny,
+        're': reynolds,
+        'tau': tau,
+        'walls': ['t', 'l', 'r', 'b'],
+        'periodic': [],
+        'inputs': [{
+            't': velocity
+        }]
+    }
+
+    simulation = LBM.load_simulation('../Re200/results/npy/9990000.npy', conditions = conditions)
     simulation.run(steps = 10000000, save = 10000)
 
     plotter('9990000.npy', rewrite = True)
