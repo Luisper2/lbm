@@ -115,8 +115,8 @@ class LBM():
 
         self.params = {
             't': {
-                'bb':       jnp.array([2, 5, 6], dtype=jnp.int32),
-                'comp':     self.ex,
+                'bb':    jnp.array([2, 5, 6], dtype=jnp.int32),
+                'comp':  self.ex,
                 'int': {
                     'i': jnp.arange(1, self.nx+1, dtype=jnp.int32),
                     'j': self.ny
@@ -127,8 +127,8 @@ class LBM():
                 },
             },
             'b': {
-                'bb':        jnp.array([4, 7, 8], dtype=jnp.int32),
-                'comp':      self.ex,
+                'bb':    jnp.array([4, 7, 8], dtype=jnp.int32),
+                'comp':  self.ex,
                 'int':  {
                     'i': jnp.arange(1, self.nx+1, dtype=jnp.int32),
                     'j': 1
@@ -139,8 +139,8 @@ class LBM():
                 },
             },
             'l': {
-                'bb':       jnp.array([3, 6, 7], dtype=jnp.int32),
-                'comp':     self.ey,
+                'bb':    jnp.array([3, 6, 7], dtype=jnp.int32),
+                'comp':  self.ey,
                 'int': {
                     'i': 1,
                     'j': jnp.arange(1, self.ny+1, dtype=jnp.int32)
@@ -151,8 +151,8 @@ class LBM():
                 },
             },
             'r': {
-                'bb':       jnp.array([1, 5, 8], dtype=jnp.int32),
-                'comp':     self.ey,
+                'bb':    jnp.array([1, 5, 8], dtype=jnp.int32),
+                'comp':  self.ey,
                 'int': {
                     'i': self.nx,
                     'j': jnp.arange(1, self.ny+1, dtype=jnp.int32)
@@ -162,6 +162,8 @@ class LBM():
                     'j': jnp.arange(1, self.ny+1, dtype=jnp.int32)
                 },
             },
+            'h': [0, 2, 4],
+            'v': [0, 1, 3],
         }
 
         self.x, self.y = jnp.meshgrid(jnp.arange(self.nx + 2, dtype=jnp.float32) - 0.5, jnp.arange(self.ny + 2, dtype=jnp.float32) - 0.5, indexing='ij')
@@ -221,9 +223,106 @@ class LBM():
         return f_steam, ftemp
 
     @partial(jax.jit, static_argnums=0)
+    def periodic(self, f: jnp.ndarray) -> jnp.ndarray:
+        periodic = self.conditions.get('periodic', [])
+        
+        if 'h' in periodic or 'horizontal' in periodic:
+            f = f.at[:, 0, :].set(f[:, -2, :])
+            f = f.at[:, -1, :].set(f[:, 1, :])
+        
+        if 'v' in periodic or 'vertical' in periodic:
+            f = f.at[:, :, 0].set(f[:, :, -2])
+            f = f.at[:, :, -1].set(f[:, :, 1])
+            
+        return f
+    
+    @partial(jax.jit, static_argnums=0)
     def bounce_back(self, f: jnp.ndarray) -> jnp.ndarray:
         return jnp.stack([jnp.where(self.mask, f[self.bounce[k]], f[k]) for k in range(self.dimentions)], axis=0)
 
+    @partial(jax.jit, static_argnums=0)
+    def inflow(self, f: jnp.ndarray) -> jnp.ndarray:
+        f_updated = f
+        
+        side_configs = {
+            'l': {
+                'coeffs': jnp.array([2.0/3.0, 1.0/6.0, 1.0/6.0]),
+                'trans_signs': jnp.array([0.0, 1.0, -1.0]),
+                'flow_sign': 1.0
+            },
+            'r': {
+                'coeffs': jnp.array([-2.0/3.0, -1.0/6.0, -1.0/6.0]),
+                'trans_signs': jnp.array([0.0, -1.0, 1.0]),
+                'flow_sign': -1.0
+            },
+            't': {
+                'coeffs': jnp.array([-2.0/3.0, -1.0/6.0, -1.0/6.0]),
+                'trans_signs': jnp.array([0.0, -1.0, 1.0]),
+                'flow_sign': -1.0
+            },
+            'b': {
+                'coeffs': jnp.array([2.0/3.0, 1.0/6.0, 1.0/6.0]),
+                'trans_signs': jnp.array([0.0, 1.0, -1.0]),
+                'flow_sign': 1.0
+            }
+        }
+        
+        for input_config in self.conditions.get('inputs', []):
+            for side, velocity_val in input_config.items():
+                if (side in self.conditions.get('walls', []) or 
+                    side not in self.params or 
+                    side not in side_configs):
+                    continue
+                
+                param = self.params[side]
+                config = side_configs[side]
+                
+                ext_i = jnp.atleast_1d(jnp.asarray(param['ext']['i']))
+                ext_j = jnp.atleast_1d(jnp.asarray(param['ext']['j']))
+                
+                if ext_i.size == 1 and ext_j.size > 1:
+                    i_coords = jnp.full_like(ext_j, ext_i[0])
+                    j_coords = ext_j
+                elif ext_j.size == 1 and ext_i.size > 1:
+                    i_coords = ext_i
+                    j_coords = jnp.full_like(ext_i, ext_j[0])
+                else:
+                    i_coords = ext_i
+                    j_coords = ext_j
+                
+                if side in ('l', 'r'):
+                    conserved_idx = jnp.array(self.params['h'])
+                    trans_diff = f_updated[2, i_coords, j_coords] - f_updated[4, i_coords, j_coords]
+                else:
+                    conserved_idx = jnp.array(self.params['v'])
+                    trans_diff = f_updated[1, i_coords, j_coords] - f_updated[3, i_coords, j_coords]
+                
+                bb_idx = param['bb']
+                conserved_vals = f_updated[conserved_idx[:, None], i_coords, j_coords]
+                bb_vals = f_updated[bb_idx[:, None], i_coords, j_coords]
+                
+                conserved_sum = jnp.sum(conserved_vals, axis=0)
+                bb_sum = jnp.sum(bb_vals, axis=0)
+                
+                rho_boundary = (conserved_sum + 2.0 * bb_sum) / (1.0 + config['flow_sign'] * velocity_val)
+                
+                unknown_dirs = param['bb']
+                known_dirs = [self.bounce[i] for i in param['bb']]
+                coeffs = config['coeffs']
+                trans_signs = config['trans_signs']
+                
+                for k, (unknown, known, coeff, trans_sign) in enumerate(
+                    zip(unknown_dirs, known_dirs, coeffs, trans_signs)
+                ):
+                    known_vals = f_updated[known, i_coords, j_coords]
+                    velocity_corr = coeff * rho_boundary * velocity_val
+                    transverse_corr = trans_sign * 0.5 * trans_diff
+                    
+                    new_vals = known_vals + velocity_corr + transverse_corr
+                    f_updated = f_updated.at[unknown, i_coords, j_coords].set(new_vals)
+        
+        return f_updated
+    
     @partial(jax.jit, static_argnums=0)
     def neumann_bc(self, f: jnp.ndarray = None, ftemp: jnp.ndarray = None, rho: jnp.ndarray = None) -> jnp.ndarray:
         walls  = self.conditions.get('walls', [])
@@ -283,8 +382,10 @@ class LBM():
         feq         = self.equilibrium(u, v, rho)
         fcol        = self.collide(f, feq)
         fstr, ftemp = self.stream(fcol)
-        fbb         = self.bounce_back(fstr)
-        fneu        = self.neumann_bc(fbb, ftemp, rho)
+        fper        = self.periodic(fstr)
+        fbb         = self.bounce_back(fper)
+        fbc         = self.inflow(fbb)
+        fneu        = self.neumann_bc(fbc, ftemp, rho)
         u, v, rho   = self.macroscopic(fneu)
         
         return fneu, u, v, rho

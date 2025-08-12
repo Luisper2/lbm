@@ -83,8 +83,10 @@ target/
 .ipynb_checkpoints
 
 *.npy
+*.dat
+*.png
 
 apiKeys.json
 
-examples/Cavity/*/results/
+examples/Cavity/*/results/*
 lbmpy/tests/*
