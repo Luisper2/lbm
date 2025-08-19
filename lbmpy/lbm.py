@@ -91,7 +91,7 @@ class LBM():
             'tau': 1,
             'walls': [],
             'periodic': ['v'],
-            'inputs': [{
+            'input': [{
                 'l': 0.1
             }]
         }
@@ -188,9 +188,10 @@ class LBM():
 
         if mask is not None and mask.shape == expected:
             self.mask = jnp.pad(mask, pad_width=((1,1), (1,1)), constant_values=False)
+        elif mask is not None and mask.shape == shape:
+            self.mask = mask
         else:
             self.mask = jnp.zeros((self.nx+2, self.ny+2), dtype=bool)
-
 
         for wall in self.conditions.get('walls', []):
             ext = self.params[wall]['ext']
@@ -242,16 +243,24 @@ class LBM():
 
     @partial(jax.jit, static_argnums=0)
     def neumann_bc(self, f: jnp.ndarray = None, ftemp: jnp.ndarray = None, rho: jnp.ndarray = None) -> jnp.ndarray:
-        inputs = self.conditions.get('inputs', [])
-        if not inputs:
-            return f
+        inp_dict = {}
 
-        raw = {
-            side: inp[side]
-            for inp in inputs
-            for side in ('t', 'b', 'l', 'r')
-            if side in inp
-        }
+        single = self.conditions.get('input', None)
+        if isinstance(single, dict):
+            for side in ('t', 'b', 'l', 'r'):
+                if side in single:
+                    inp_dict[side] = single[side]
+
+        multi = self.conditions.get('input', None)
+        
+        if isinstance(multi, (list, tuple)):
+            for inp in multi:
+                for side in ('t', 'b', 'l', 'r'):
+                    if side in inp:
+                        inp_dict[side] = inp[side]
+
+        if not inp_dict:
+            return f
 
         def normalize_uv(side, spec):
             if isinstance(spec, dict):
@@ -259,21 +268,17 @@ class LBM():
             elif isinstance(spec, (tuple, list)) and len(spec) == 2:
                 ux, uy = spec[0], spec[1]
             else:
-                if side in ('l', 'r'):
-                    ux, uy = spec, 0.0
-                else:
-                    ux, uy = 0.0, spec
+                ux, uy = (spec, 0.0) if side in ('l', 'r') else (0.0, spec)
 
             def to_fun(val):
                 if callable(val):
                     return val
-                else:
-                    c = jnp.asarray(val, dtype=jnp.float32)
-                    return lambda I, J: jnp.broadcast_to(c, I.shape)
+                c = jnp.asarray(val, dtype=jnp.float32)
+                return lambda I, J: jnp.broadcast_to(c, I.shape)
 
             return to_fun(ux), to_fun(uy)
 
-        for side, spec in raw.items():
+        for side, spec in inp_dict.items():
             if side not in self.params:
                 continue
 
@@ -281,8 +286,6 @@ class LBM():
 
             p     = self.params[side]
             k_idx = p['bb']
-            ex    = self.ex[k_idx]
-            ey    = self.ey[k_idx]
 
             if side in ('t', 'b'):
                 i_idx = p['int']['i']
@@ -302,6 +305,7 @@ class LBM():
             ey = self.ey[k_idx][:, None]
             eu   = ex * ux + ey * uy
             term = 6.0 * self.wt[k_idx][:, None] * rho[I, J] * eu
+
             new_vals = ftemp[K, I, J] - term
 
             bb = self.bounce[K]
@@ -395,7 +399,7 @@ class LBM():
 
         return cls(conditions = load_conditions, mask = load_mask, u = u.T, v = v.T, rho = rho.T, prefix = prefix, continue_iteration = int(load_conditions['iteration']) if continue_iteration else 0)
 
-def plotter (dir: str = '0000000.npy', save_dir = None, rewrite: bool = False, velocity: bool = True, density: bool = True, vorticity: bool = True):
+def plotter (dir: str = '0000000.npy', save_dir = None, rewrite: bool = False, show_path: bool = False, velocity: bool = True, density: bool = True, vorticity: bool = True):
     def create_plot(file_path, X, Y, data, u = None, v = None, title: str = '', label: str = ''):
         width = X.max() - X.min()
         height = Y.max() - Y.min()
@@ -460,14 +464,15 @@ def plotter (dir: str = '0000000.npy', save_dir = None, rewrite: bool = False, v
         u = u[1:-1, 1:-1]
         v = v[1:-1, 1:-1]
         rho = rho[1:-1, 1:-1]
+        mask = mask[1:-1, 1:-1]
 
-        remove = ['nx', 'ny', 'walls', 'periodic', 'inputs']  
+        remove = ['nx', 'ny', 'walls', 'periodic', 'input']  
         cache = copy.deepcopy(conditions)
 
         for key in remove:
             cache.pop(key, None)
 
-        remove = ['nx', 'ny', 'walls', 'periodic', 'inputs']
+        remove = ['nx', 'ny', 'walls', 'periodic', 'input']
         cache = conditions.copy()
 
         for key in remove:
@@ -489,3 +494,5 @@ def plotter (dir: str = '0000000.npy', save_dir = None, rewrite: bool = False, v
         
         if density and (rewrite or not os.path.exists(density_path)):
             create_plot(density_path, X, Y, rho, None, None, name, 'Density')
+
+        print(f'{base} plotted {({cache_path}) if show_path else ''}')
