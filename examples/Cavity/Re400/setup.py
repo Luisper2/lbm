@@ -34,4 +34,9 @@ if __name__ == '__main__':
 
     plotter('9990000.npy', rewrite = True)
 
+    # simulation = LBM(conditions = conditions)
+    # simulation.run()
+    
+    # plotter('0005000.npy')
+
     print(f'Done ({(time.perf_counter() - start):.3f}s)')

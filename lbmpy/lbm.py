@@ -241,126 +241,73 @@ class LBM():
         return jnp.stack([jnp.where(self.mask, f[self.bounce[k]], f[k]) for k in range(self.dimentions)], axis=0)
 
     @partial(jax.jit, static_argnums=0)
-    def inflow(self, f: jnp.ndarray) -> jnp.ndarray:
-        f_updated = f
-        
-        side_configs = {
-            'l': {
-                'coeffs': jnp.array([2.0/3.0, 1.0/6.0, 1.0/6.0]),
-                'trans_signs': jnp.array([0.0, 1.0, -1.0]),
-                'flow_sign': 1.0
-            },
-            'r': {
-                'coeffs': jnp.array([-2.0/3.0, -1.0/6.0, -1.0/6.0]),
-                'trans_signs': jnp.array([0.0, -1.0, 1.0]),
-                'flow_sign': -1.0
-            },
-            't': {
-                'coeffs': jnp.array([-2.0/3.0, -1.0/6.0, -1.0/6.0]),
-                'trans_signs': jnp.array([0.0, -1.0, 1.0]),
-                'flow_sign': -1.0
-            },
-            'b': {
-                'coeffs': jnp.array([2.0/3.0, 1.0/6.0, 1.0/6.0]),
-                'trans_signs': jnp.array([0.0, 1.0, -1.0]),
-                'flow_sign': 1.0
-            }
-        }
-        
-        for input_config in self.conditions.get('inputs', []):
-            for side, velocity_val in input_config.items():
-                if (side in self.conditions.get('walls', []) or 
-                    side not in self.params or 
-                    side not in side_configs):
-                    continue
-                
-                param = self.params[side]
-                config = side_configs[side]
-                
-                ext_i = jnp.atleast_1d(jnp.asarray(param['ext']['i']))
-                ext_j = jnp.atleast_1d(jnp.asarray(param['ext']['j']))
-                
-                if ext_i.size == 1 and ext_j.size > 1:
-                    i_coords = jnp.full_like(ext_j, ext_i[0])
-                    j_coords = ext_j
-                elif ext_j.size == 1 and ext_i.size > 1:
-                    i_coords = ext_i
-                    j_coords = jnp.full_like(ext_i, ext_j[0])
-                else:
-                    i_coords = ext_i
-                    j_coords = ext_j
-                
-                if side in ('l', 'r'):
-                    conserved_idx = jnp.array(self.params['h'])
-                    trans_diff = f_updated[2, i_coords, j_coords] - f_updated[4, i_coords, j_coords]
-                else:
-                    conserved_idx = jnp.array(self.params['v'])
-                    trans_diff = f_updated[1, i_coords, j_coords] - f_updated[3, i_coords, j_coords]
-                
-                bb_idx = param['bb']
-                conserved_vals = f_updated[conserved_idx[:, None], i_coords, j_coords]
-                bb_vals = f_updated[bb_idx[:, None], i_coords, j_coords]
-                
-                conserved_sum = jnp.sum(conserved_vals, axis=0)
-                bb_sum = jnp.sum(bb_vals, axis=0)
-                
-                rho_boundary = (conserved_sum + 2.0 * bb_sum) / (1.0 + config['flow_sign'] * velocity_val)
-                
-                unknown_dirs = param['bb']
-                known_dirs = [self.bounce[i] for i in param['bb']]
-                coeffs = config['coeffs']
-                trans_signs = config['trans_signs']
-                
-                for k, (unknown, known, coeff, trans_sign) in enumerate(
-                    zip(unknown_dirs, known_dirs, coeffs, trans_signs)
-                ):
-                    known_vals = f_updated[known, i_coords, j_coords]
-                    velocity_corr = coeff * rho_boundary * velocity_val
-                    transverse_corr = trans_sign * 0.5 * trans_diff
-                    
-                    new_vals = known_vals + velocity_corr + transverse_corr
-                    f_updated = f_updated.at[unknown, i_coords, j_coords].set(new_vals)
-        
-        return f_updated
-    
-    @partial(jax.jit, static_argnums=0)
     def neumann_bc(self, f: jnp.ndarray = None, ftemp: jnp.ndarray = None, rho: jnp.ndarray = None) -> jnp.ndarray:
-        walls  = self.conditions.get('walls', [])
         inputs = self.conditions.get('inputs', [])
+        if not inputs:
+            return f
 
-        u_vals = {
+        raw = {
             side: inp[side]
             for inp in inputs
-            for side in ('t','b','l','r')
+            for side in ('t', 'b', 'l', 'r')
             if side in inp
         }
 
-        for side in walls:
-            if side not in self.params or side not in u_vals:
+        def normalize_uv(side, spec):
+            if isinstance(spec, dict):
+                ux, uy = spec.get('u', 0.0), spec.get('v', 0.0)
+            elif isinstance(spec, (tuple, list)) and len(spec) == 2:
+                ux, uy = spec[0], spec[1]
+            else:
+                if side in ('l', 'r'):
+                    ux, uy = spec, 0.0
+                else:
+                    ux, uy = 0.0, spec
+
+            def to_fun(val):
+                if callable(val):
+                    return val
+                else:
+                    c = jnp.asarray(val, dtype=jnp.float32)
+                    return lambda I, J: jnp.broadcast_to(c, I.shape)
+
+            return to_fun(ux), to_fun(uy)
+
+        for side, spec in raw.items():
+            if side not in self.params:
                 continue
 
-            p      = self.params[side]
-            k_idx  = p['bb']
-            comp   = p['comp']
-            u_wall = u_vals[side]
+            ux_fun, uy_fun = normalize_uv(side, spec)
 
-            if side in ('t','b'):
+            p     = self.params[side]
+            k_idx = p['bb']
+            ex    = self.ex[k_idx]
+            ey    = self.ey[k_idx]
+
+            if side in ('t', 'b'):
                 i_idx = p['int']['i']
                 j     = p['int']['j']
                 K, I  = jnp.meshgrid(k_idx, i_idx, indexing='ij')
                 J     = jnp.full_like(I, j)
-
             else:
                 j_idx = p['int']['j']
                 i     = p['int']['i']
                 K, J  = jnp.meshgrid(k_idx, j_idx, indexing='ij')
                 I     = jnp.full_like(J, i)
 
-            term     = 6 * self.wt[K] * rho[I, J] * comp[K] * u_wall
-            new_vals = ftemp[K, I, J] - term
-            bb       = self.bounce[K]
+            ux = jnp.asarray(ux_fun(I, J), dtype=jnp.float32)
+            uy = jnp.asarray(uy_fun(I, J), dtype=jnp.float32)
 
-            f = f.at[bb, I, J].set(new_vals)
+            ex = self.ex[k_idx][:, None]
+            ey = self.ey[k_idx][:, None]
+            eu   = ex * ux + ey * uy
+            term = 6.0 * self.wt[k_idx][:, None] * rho[I, J] * eu
+            new_vals = ftemp[K, I, J] - term
+
+            bb = self.bounce[K]
+
+            free_cell = ~self.mask[I, J]
+            f = f.at[bb, I, J].set(jnp.where(free_cell, new_vals, f[bb, I, J]))
 
         return f
 
@@ -384,13 +331,12 @@ class LBM():
         fstr, ftemp = self.stream(fcol)
         fper        = self.periodic(fstr)
         fbb         = self.bounce_back(fper)
-        fbc         = self.inflow(fbb)
-        fneu        = self.neumann_bc(fbc, ftemp, rho)
+        fneu        = self.neumann_bc(fbb, ftemp, rho)
         u, v, rho   = self.macroscopic(fneu)
         
         return fneu, u, v, rho
 
-    def save(self, dir: str, export: str = 'npy', iteration: int = 0, u: jnp.ndarray = None, v: jnp.ndarray = None, rho: jnp.ndarray = None, conditions: dict = {}, mask: jnp.ndarray = None) -> None:
+    def save(self, dir: str, export: str = 'npy', iteration: int = 0, u: jnp.ndarray = None, v: jnp.ndarray = None, rho: jnp.ndarray = None, mask: jnp.ndarray = None, conditions: dict = {}) -> None:
         name = os.path.join(dir, f'{self.prefix}{iteration:07d}.{export}')
 
         if export == 'npy':
@@ -421,7 +367,7 @@ class LBM():
         else:
             raise ValueError(f'Unsupported format ({export}). Use .npy or .dat.')
     
-    def run(self, steps: int = 5001, save: int = 100, dir = os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), 'results'), export: str = 'npy'):
+    def run(self, steps: int = 5001, save: int = 100, dir = os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), 'results'), export: str = 'npy', saving: bool = True):
         save_path = os.path.join(dir, export)
         os.makedirs(save_path, exist_ok = True)
 
@@ -430,10 +376,10 @@ class LBM():
         for it in tqdm(range(self.continue_iterations, self.continue_iterations + steps)):
             f, u, v, rho = self.step(f, u, v, rho)
 
-            if it % save == 0:
+            if saving and it % save == 0:
                 self.conditions['iteration'] = it
 
-                self.save(save_path, export, it, u, v, rho, self.conditions, mask)
+                self.save(save_path, export, it, u, v, rho, mask, self.conditions)
 
         self.f, self.u, self.v, self.rho = f, u, v, rho
 

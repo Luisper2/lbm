@@ -12,7 +12,7 @@ if __name__ == '__main__':
     ny = 256
 
     tau      = 1
-    velocity = 6e-8
+    velocity = 0.1
 
     conditions = {
         'nx': nx,
@@ -20,15 +20,15 @@ if __name__ == '__main__':
         'tau': tau,
         'walls': [],
         'periodic': ['v'],
-        'inputs': [{
-            'l': velocity
-        }]
+        'input': {
+            'l': { 'u': velocity, 'v': 0 }
+        }
     }
 
     simulation = LBM(conditions = conditions)
-    simulation.run(steps = 1001, save = 100, export = 'dat')
+    simulation.run(steps = 1001, save = 100)
     
-    for i in range(100, 1000, 100):
+    for i in range(100, 1001, 100):
         plotter(f'{i:07d}.dat', rewrite = True)
 
     print(f'Done ({(time.perf_counter() - start):.3f}s)')
