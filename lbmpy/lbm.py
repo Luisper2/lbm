@@ -8,6 +8,9 @@ import jax.numpy as jnp
 from pathlib import Path
 from functools import partial
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
+
+matplotlib.use('Agg')
 
 def load_data(file_path):
     extension = os.path.splitext(file_path)[1].lower()
@@ -82,6 +85,84 @@ def load_data(file_path):
         raise ValueError(f'Unsupported format ({extension}). Use .npy or .dat.')
 
     return X, Y, u, v, rho, conditions, mask
+
+def _plotting(file_path, u: jnp.ndarray = None, v: jnp.ndarray = None, rho: jnp.ndarray = None, mask: jnp.ndarray = None, conditions = {}, rewrite: bool = False, dimensions: slice | tuple[slice, ...] = (slice(1, -1), slice(1, -1)), velocity: bool = True, density: bool = True, vorticity: bool = True) -> None:
+    def create_plot(file_path, X, Y, data, u = None, v = None, title: str = '', label: str = ''):
+        width = X.max() - X.min()
+        height = Y.max() - Y.min()
+        aspect_ratio = width / height
+
+        base_height = 6
+        figsize = (aspect_ratio * base_height, base_height)
+
+        fig, ax = plt.subplots(figsize=figsize)
+
+        mesh = ax.pcolormesh(X, Y, data, shading='auto', cmap='rainbow')
+
+        fig.colorbar(mesh, ax=ax, label=label)
+
+        if u is not None and v is not None:
+            ax.streamplot(X, Y, u, v, density=1, color='k', linewidth=0.7, arrowsize=0.5)
+
+        if mask is not None:
+            black_cmap = ListedColormap(['none', 'white'])
+            ax.pcolormesh(X, Y, mask, shading='auto', cmap=black_cmap, vmin=0, vmax=1)
+
+        ax.set_title(title)
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+
+        ax.set_xlim(X.min()+1, X.max()-1)
+        ax.set_ylim(Y.min()+1, Y.max()-1)
+
+        ax.set_aspect('auto')
+
+        fig.savefig(file_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+    
+    base = Path(file_path).with_suffix('')
+    os.makedirs(base, exist_ok = True)
+
+    ny, nx = u.shape
+    x = np.arange(nx)
+    y = np.arange(ny)
+    X, Y = np.meshgrid(x, y)
+
+    X = X[dimensions]
+    Y = Y[dimensions]
+    u = u[dimensions]
+    v = v[dimensions]
+    rho = rho[dimensions]
+    mask = mask[dimensions]
+
+    remove = ['nx', 'ny', 'walls', 'periodic', 'input']  
+    cache = copy.deepcopy(conditions)
+
+    for key in remove:
+        cache.pop(key, None)
+
+    remove = ['nx', 'ny', 'walls', 'periodic', 'input']
+    cache = conditions.copy()
+
+    for key in remove:
+        cache.pop(key, None)
+
+    name = f'{', '.join([*[f'{k}={cache[k]}' for k in cache]])} ({conditions['nx']}, {conditions['ny']})'
+
+    velocity_path = os.path.join(base, 'Velocity.png')
+    voritcity_path = os.path.join(base, 'Vorticity.png')
+    density_path = os.path.join(base, 'Density.png')
+
+    if velocity and (rewrite or not os.path.exists(velocity_path)):
+        data = np.sqrt(u ** 2 + v ** 2)
+        create_plot(velocity_path, X, Y, data, u, v, name, 'Velocity')
+
+    if vorticity and (rewrite or not os.path.exists(voritcity_path)):
+        data = np.gradient(v, axis = 1) - np.gradient(u, axis = 0)
+        create_plot(voritcity_path, X, Y, data, None, None, name, 'Vorticity')
+    
+    if density and (rewrite or not os.path.exists(density_path)):
+        create_plot(density_path, X, Y, rho, None, None, name, 'Density')
 
 class LBM():
     def __init__(self, conditions: dict = None, mask: jnp.ndarray = None, u: jnp.ndarray = None, v: jnp.ndarray = None, rho: jnp.ndarray = None, prefix: str = None, continue_iteration: int = 0):
@@ -181,10 +262,10 @@ class LBM():
         if rho is not None:
             self.rho = rho
 
+        expected = (self.nx, self.ny)
+
         self.f = self.equilibrium(self.u, self.v, self.rho)
         self.ferr = jnp.zeros_like(self.f)
-
-        expected = (self.nx, self.ny)
 
         if mask is not None and mask.shape == expected:
             self.mask = jnp.pad(mask, pad_width=((1,1), (1,1)), constant_values=False)
@@ -219,9 +300,10 @@ class LBM():
             return jnp.roll(jnp.roll(fk, dx, axis=0), dy, axis=1)
 
         ftemp   = f
-        f_steam = jnp.stack([shift_fk(f[k], self.ex[k], self.ey[k]) for k in range(self.dimentions)])
+        shifts = [(self.ex[k], self.ey[k]) for k in range(self.dimentions)]
+        f_stream = jnp.stack([jnp.roll(jnp.roll(f[k], dx, axis=0), dy, axis=1) for k, (dx, dy) in enumerate(shifts)])
 
-        return f_steam, ftemp
+        return f_stream, ftemp
 
     @partial(jax.jit, static_argnums=0)
     def periodic(self, f: jnp.ndarray) -> jnp.ndarray:
@@ -238,8 +320,8 @@ class LBM():
         return f
     
     @partial(jax.jit, static_argnums=0)
-    def bounce_back(self, f: jnp.ndarray) -> jnp.ndarray:
-        return jnp.stack([jnp.where(self.mask, f[self.bounce[k]], f[k]) for k in range(self.dimentions)], axis=0)
+    def bounce_back(self, f: jnp.ndarray, ftemp: jnp.ndarray) -> jnp.ndarray:
+        return jnp.stack([jnp.where(self.mask, ftemp[self.bounce[k]], f[k]) for k in range(self.dimentions)], axis=0)
 
     @partial(jax.jit, static_argnums=0)
     def neumann_bc(self, f: jnp.ndarray = None, ftemp: jnp.ndarray = None, rho: jnp.ndarray = None) -> jnp.ndarray:
@@ -318,13 +400,9 @@ class LBM():
     @partial(jax.jit, static_argnums=0)
     def macroscopic(self, f: jnp.ndarray = None) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         rho = jnp.sum(f, axis=0)
-        nonzero = rho > 1e-8
-
-        u = jnp.sum(f * self.ex[:,None,None], axis=0) / jnp.where(nonzero, rho, 1.0)
-        v = jnp.sum(f * self.ey[:,None,None], axis=0) / jnp.where(nonzero, rho, 1.0)
-
-        u = jnp.where(nonzero, u, 0.0)
-        v = jnp.where(nonzero, v, 0.0)
+        inv_rho = jnp.where(rho > 1e-8, 1.0 / rho, 0.0)
+        u = jnp.sum(f * self.ex[:, None, None], axis=0) * inv_rho
+        v = jnp.sum(f * self.ey[:, None, None], axis=0) * inv_rho
 
         return u, v, rho
 
@@ -334,10 +412,10 @@ class LBM():
         fcol        = self.collide(f, feq)
         fstr, ftemp = self.stream(fcol)
         fper        = self.periodic(fstr)
-        fbb         = self.bounce_back(fper)
+        fbb         = self.bounce_back(fper, ftemp)
         fneu        = self.neumann_bc(fbb, ftemp, rho)
         u, v, rho   = self.macroscopic(fneu)
-        
+
         return fneu, u, v, rho
 
     def save(self, dir: str, export: str = 'npy', iteration: int = 0, u: jnp.ndarray = None, v: jnp.ndarray = None, rho: jnp.ndarray = None, mask: jnp.ndarray = None, conditions: dict = {}) -> None:
@@ -346,33 +424,28 @@ class LBM():
         if export == 'npy':
             jnp.save(name, { 'u': jnp.array(u), 'v': jnp.array(v), 'rho': jnp.array(rho), 'conditions': conditions, 'mask': mask })
         elif export == 'dat':
-            u_np   = np.asarray(u)
-            v_np   = np.asarray(v)
-            rho_np = np.asarray(rho)
-            mask_np= np.asarray(mask)
-            nx, ny = u_np.shape
+            unp    = np.asarray(u)
+            vnp    = np.asarray(v)
+            rhonp  = np.asarray(rho)
+            masknp = np.asarray(mask, dtype = bool)
 
-            with open(name, 'w') as f:
-                f.write('# X Y U V RHO MASK\n')
-                
-                for key, val in conditions.items():
-                    f.write(f'# {key}: {val}\n')
+            nx, ny = unp.shape
 
-                for i in range(nx):
-                    for j in range(ny):
-                        m = int(mask_np[i, j])
-                        f.write(
-                            f'{i} {j} '
-                            f'{u_np[i, j]:.6e} '
-                            f'{v_np[i, j]:.6e} '
-                            f'{rho_np[i, j]:.6e} '
-                            f'{m}\n'
-                        )
+            I, J = np.indices((nx, ny))
+
+            out = np.column_stack([I.ravel(), J.ravel(), unp.ravel(), vnp.ravel(), rhonp.ravel(), masknp.ravel().astype(int)])
+
+            header_lines = ['# X Y U V RHO MASK']
+            header_lines += [f'# {k}: {v}' for k, v in conditions.items()]
+            header = '\n'.join(header_lines)
+
+            np.savetxt(name, out, fmt = ['%d', '%d', '%.6e', '%.6e', '%.6e', '%d'], header = header, comments = '')
         else:
             raise ValueError(f'Unsupported format ({export}). Use .npy or .dat.')
     
-    def run(self, steps: int = 5001, save: int = 100, dir = os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), 'results'), export: str = 'npy', saving: bool = True):
+    def run(self, steps: int = 5001, save: int = 100, dir = os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), 'results'), export: str = 'npy', saving: bool = True, plotting: bool = True, dimensions: slice | tuple[slice, ...] = (slice(1, -1), slice(1, -1))):
         save_path = os.path.join(dir, export)
+
         os.makedirs(save_path, exist_ok = True)
 
         f, mask, u, v, rho = self.f, self.mask, self.u, self.v, self.rho
@@ -384,6 +457,14 @@ class LBM():
                 self.conditions['iteration'] = it
 
                 self.save(save_path, export, it, u, v, rho, mask, self.conditions)
+
+        if plotting:
+            print('Plotting...')
+
+            for it in range(self.continue_iterations, self.continue_iterations + steps, save):
+                plot_path = os.path.join(dir, 'plots', f'{it:07d}.{export}')
+
+                _plotting(plot_path, u.T, v.T, rho.T, mask.T, self.conditions, rewrite = True, dimensions = dimensions)
 
         self.f, self.u, self.v, self.rho = f, u, v, rho
 
@@ -399,38 +480,7 @@ class LBM():
 
         return cls(conditions = load_conditions, mask = load_mask, u = u.T, v = v.T, rho = rho.T, prefix = prefix, continue_iteration = int(load_conditions['iteration']) if continue_iteration else 0)
 
-def plotter (dir: str = '0000000.npy', save_dir = None, rewrite: bool = False, show_path: bool = False, velocity: bool = True, density: bool = True, vorticity: bool = True):
-    def create_plot(file_path, X, Y, data, u = None, v = None, title: str = '', label: str = ''):
-        width = X.max() - X.min()
-        height = Y.max() - Y.min()
-        aspect_ratio = width / height
-
-        base_height = 6
-        figsize = (aspect_ratio * base_height, base_height)
-
-        fig, ax = plt.subplots(figsize=figsize)
-
-        mesh = ax.pcolormesh(X, Y, data, shading='auto', cmap='rainbow')
-
-        fig.colorbar(mesh, ax=ax, label=label)
-
-        if u is not None and v is not None:
-            ax.streamplot(X, Y, u, v, density=1, color='k', linewidth=0.7, arrowsize=0.5)
-
-        ax.set_title(title)
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-
-        ax.set_xlim(X.min()+1, X.max()-1)
-        ax.set_ylim(Y.min()+1, Y.max()-1)
-
-        ax.set_aspect('auto')
-
-        fig.savefig(file_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
-
-    matplotlib.use('Agg')
-
+def plotter(dir: str = '0000000.npy', save_dir = None, rewrite: bool = False, dimensions: slice | tuple[slice, ...] = (slice(1, -1), slice(1, -1)), velocity: bool = True, density: bool = True, vorticity: bool = True) -> None:
     extension = Path(dir).suffix.lstrip('.')
     path = os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), 'results', extension, f'{dir}')
     
@@ -458,41 +508,5 @@ def plotter (dir: str = '0000000.npy', save_dir = None, rewrite: bool = False, s
         os.makedirs(cache_path, exist_ok = True)
 
         X, Y, u, v, rho, conditions, mask = load_data(file)
-
-        X = X[1:-1, 1:-1]
-        Y = Y[1:-1, 1:-1]
-        u = u[1:-1, 1:-1]
-        v = v[1:-1, 1:-1]
-        rho = rho[1:-1, 1:-1]
-        mask = mask[1:-1, 1:-1]
-
-        remove = ['nx', 'ny', 'walls', 'periodic', 'input']  
-        cache = copy.deepcopy(conditions)
-
-        for key in remove:
-            cache.pop(key, None)
-
-        remove = ['nx', 'ny', 'walls', 'periodic', 'input']
-        cache = conditions.copy()
-
-        for key in remove:
-            cache.pop(key, None)
-
-        name = f'{', '.join([*[f'{k}={cache[k]}' for k in cache]])} ({conditions['nx']}, {conditions['ny']})' or base
-
-        velocity_path = os.path.join(cache_path, 'Velocity.png')
-        voritcity_path = os.path.join(cache_path, 'Vorticity.png')
-        density_path = os.path.join(cache_path, 'Density.png')
-
-        if velocity and (rewrite or not os.path.exists(velocity_path)):
-            data = np.sqrt(u ** 2 + v ** 2)
-            create_plot(velocity_path, X, Y, data, u, v, name, 'Velocity')
-
-        if vorticity and (rewrite or not os.path.exists(voritcity_path)):
-            data = np.gradient(v, axis = 1) - np.gradient(u, axis = 0)
-            create_plot(voritcity_path, X, Y, data, None, None, name, 'Vorticity')
         
-        if density and (rewrite or not os.path.exists(density_path)):
-            create_plot(density_path, X, Y, rho, None, None, name, 'Density')
-
-        print(f'{base} plotted {({cache_path}) if show_path else ''}')
+        _plotting(cache_path, u, v, rho, mask, conditions, rewrite, dimensions, velocity, density, vorticity)
