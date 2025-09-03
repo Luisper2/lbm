@@ -1,18 +1,26 @@
-import os
-import jax
-import copy
-import matplotlib
 import numpy as np
 from tqdm import tqdm
 import jax.numpy as jnp
 from pathlib import Path
 from functools import partial
 import matplotlib.pyplot as plt
+import os, ast, copy, jax, json, matplotlib
 from matplotlib.colors import ListedColormap
 
 matplotlib.use('Agg')
 
 def load_data(file_path):
+    def _coerce(val: str):
+        v = val.strip()
+        try:
+            return json.loads(v)
+        except json.JSONDecodeError:
+            pass
+        try:
+            return ast.literal_eval(v)
+        except Exception:
+            return v
+        
     extension = os.path.splitext(file_path)[1].lower()
 
     if extension == '.npy':
@@ -44,7 +52,7 @@ def load_data(file_path):
                 if line.startswith('#'):
                     if ':' in line and not line.lower().startswith('# x y u v rho pressure'):
                         key, val = line.lstrip('#').split(':', 1)
-                        conditions[key.strip()] = val.strip()
+                        conditions[key.strip()] = _coerce(val)
                     continue
 
                 parts = line.split()
@@ -93,7 +101,7 @@ def load_data(file_path):
     return X, Y, u, v, rho, pressure, conditions, mask
 
 class LBM():
-    def __init__(self, conditions: dict = None, mask: jnp.ndarray = None, u: jnp.ndarray = None, v: jnp.ndarray = None, rho: jnp.ndarray = None, prefix: str = None, continue_iteration: int = 0):
+    def __init__(self, conditions: dict = None, mask: jnp.ndarray = None, u: jnp.ndarray = None, v: jnp.ndarray = None, rho: jnp.ndarray = None, pressure: jnp.ndarray = None, prefix: str = None, continue_iteration: int = 0):
         self.conditions = conditions if conditions else {
             'nx': 100,
             'ny': 100,
@@ -380,6 +388,26 @@ class LBM():
         else:
             raise ValueError(f'Unsupported format ({export}). Use .npy or .dat.')
     
+    def difference(self, type: str = 'p', indexs: tuple[int, int] = (1, -1), data: jnp.ndarray = None) -> float:
+        base = {
+            'p': self.p,
+            'd': self.rho,
+            'v': jnp.sqrt(self.u ** 2 + self.v ** 2)
+        }
+
+        if type not in base.keys():
+            return 'Unknow type'
+
+        d = base[type] if data is None else data
+        
+        start = d[indexs[0]][~self.mask[indexs[0]]]
+        end = d[indexs[1]][~self.mask[indexs[1]]]
+
+        return jnp.mean(end) - jnp.mean(start)
+
+    def porisity(self, dimensions: slice | tuple[slice, ...] = (slice(1, -1), slice(1, -1))):
+        return self.mask[dimensions[::-1]]
+
     def run(self, steps: int = 5001, save: int = 100, dir = os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), 'results'), export: str = 'npy', saving: bool = True, plotting: bool = True, dimensions: slice | tuple[slice, ...] = (slice(1, -1), slice(1, -1))):
         save_path = os.path.join(dir, export)
 
@@ -407,7 +435,7 @@ class LBM():
 
     @classmethod
     def load_simulation(cls, file_dir: str = '0000000.npy', conditions: dict = None, mask: jnp.ndarray = None, prefix: str = None, continue_iteration: bool = True):
-        X, Y, u, v, rho, load_conditions, load_mask = load_data(os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), file_dir))
+        X, Y, u, v, rho, pressure, load_conditions, load_mask = load_data(os.path.join(os.path.dirname(os.path.abspath(__import__('__main__').__file__)), file_dir))
 
         if conditions is not None:
             load_conditions.update(conditions)
@@ -415,7 +443,7 @@ class LBM():
         if mask is not None:
             load_mask = mask
 
-        return cls(conditions = load_conditions, mask = load_mask, u = u.T, v = v.T, rho = rho.T, prefix = prefix, continue_iteration = int(load_conditions['iteration']) if continue_iteration else 0)
+        return cls(conditions = load_conditions, mask = load_mask, u = u.T, v = v.T, rho = rho.T, pressure = pressure.T, prefix = prefix, continue_iteration = int(load_conditions['iteration']) if continue_iteration else 0)
 
 def plotter(dir: str = '0000000.npy', save_dir = None, rewrite: bool = False, dimensions: slice | tuple[slice, ...] = (slice(1, -1), slice(1, -1)), velocity: bool = True, density: bool = True, vorticity: bool = True, pressure: bool = True) -> None:
     def create_plot(file_path, X, Y, data, u = None, v = None, title: str = '', label: str = ''):
@@ -489,13 +517,13 @@ def plotter(dir: str = '0000000.npy', save_dir = None, rewrite: bool = False, di
         y = np.arange(ny)
         X, Y = np.meshgrid(x, y)
 
-        X = X[dimensions]
-        Y = Y[dimensions]
-        u = u[dimensions]
-        v = v[dimensions]
-        rho = rho[dimensions]
-        p = p[dimensions]
-        mask = mask[dimensions]
+        X = X[dimensions[::-1]]
+        Y = Y[dimensions[::-1]]
+        u = u[dimensions[::-1]]
+        v = v[dimensions[::-1]]
+        rho = rho[dimensions[::-1]]
+        p = p[dimensions[::-1]]
+        mask = mask[dimensions[::-1]]
 
         remove = ['nx', 'ny', 'walls', 'periodic', 'input']  
         cache = copy.deepcopy(conditions)
