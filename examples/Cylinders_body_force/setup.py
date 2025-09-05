@@ -72,7 +72,7 @@ if __name__ == "__main__":
     start = time.perf_counter()
 
     l = 56
-    radius = l / 1.8  # / jnp.sqrt(2)  # or l / jnp.sqrt(2)
+    radius = l / 4  # / jnp.sqrt(2)  # or l / jnp.sqrt(2)
 
     n_cylinders = 4
     h = l
@@ -82,24 +82,6 @@ if __name__ == "__main__":
     ny = 2 * h
 
     mask = build_periodic_cylinder_mask(nx, ny, l, h, n_cylinders, radius)
-
-    # I, J = jnp.meshgrid(jnp.arange(nx), jnp.arange(ny), indexing="ij")
-    # mask = jnp.zeros((nx, ny), dtype=bool)
-
-    # def pbc_delta(a, b, L):
-    #     # Minimum-image displacement on a periodic domain of length L
-    #     return jnp.mod(a - b + 0.5 * L, L) - 0.5 * L
-
-    # top = True
-    # for i in range(n_cylinders):
-    #     x = l * (i + 0.5)  # centers at 0.5*l, 1.5*l, ...
-    #     y = 1.5 * h if top else 0.5 * h  # two staggered rows
-
-    #     dx = pbc_delta(I, x, nx)
-    #     dy = pbc_delta(J, y, ny)
-
-    #     mask = mask | (dx**2 + dy**2 <= radius**2)
-    #     top = not top
 
     re = 1
     velocity = 0.01
@@ -114,7 +96,7 @@ if __name__ == "__main__":
         "tau": tau,
         "walls": [],
         "periodic": ["h", "v"],
-        "body_force": (-1e-4, 0.0),
+        "body_force": (1e-4, 0.0),
     }
 
     simulation = LBM(conditions=conditions, mask=mask)
